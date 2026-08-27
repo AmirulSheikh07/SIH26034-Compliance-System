@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "scan_id": "SCAN-001",
+
+  "product": {
+    "manufacturer": "ABC Foods Pvt Ltd",
+    "address": "Nagpur, Maharashtra",
+    "mrp": "₹120",
+    "net_quantity": "500 g",
+    "manufacturing_date": "06/2026",
+    "consumer_care": "18001234567",
+    "country_of_origin": "India"
+  },
+
+  "confidence": {
+    "manufacturer": 0.98,
+    "address": 0.96,
+    "mrp": 0.99,
+    "net_quantity": 0.97,
+    "manufacturing_date": 0.94,
+    "consumer_care": 0.91,
+    "country_of_origin": 0.98
+  },
+
+  "bounding_boxes": {
+    "mrp": [120, 450, 300, 500]
+  }
+}
