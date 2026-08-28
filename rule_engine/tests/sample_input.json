@@ -5,7 +5,7 @@
   "product": {
     "manufacturer": "ABC Foods Pvt Ltd",
     "address": "Nagpur, Maharashtra",
-    "mrp": "₹120",
+    "mrp": "₹120", 
     "net_quantity": "500 g",
     "manufacturing_date": "06/2026",
     "consumer_care": "18001234567",
