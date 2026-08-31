@@ -113,6 +113,16 @@ async def scan_label(
         ) from exc
 
     # ------------------------------------------------------------------
+    # Debug: print OCR extraction results to the uvicorn console so the
+    # team can verify what the pipeline actually read from the image.
+    # Remove these prints once OCR quality is confirmed.
+    # ------------------------------------------------------------------
+    print("OCR PRODUCT:", ocr_output.get("product"))
+    print("OCR MRP:", ocr_output.get("product", {}).get("mrp"))
+    print("OCR CONFIDENCE:", ocr_output.get("confidence", {}).get("mrp"))
+    print("OCR BBOX:", ocr_output.get("bounding_boxes", {}).get("mrp"))
+
+    # ------------------------------------------------------------------
     # Run the compliance engine on the real OCR output
     # ------------------------------------------------------------------
     engine_result: Dict[str, Any] = check_compliance(ocr_output)
@@ -187,10 +197,11 @@ async def scan_label(
     db.commit()
 
     # ------------------------------------------------------------------
-    # Build response – inject DB scan_id and filename
+    # Build response – inject DB scan_id, filename, and extracted product
     # ------------------------------------------------------------------
     engine_result["scan_id"] = db_scan.id
     engine_result["filename"] = file.filename
+    engine_result["product"] = ocr_output.get("product", {})
 
     return engine_result
 
