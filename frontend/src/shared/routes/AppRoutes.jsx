@@ -11,6 +11,13 @@ import InspectionDetails from '../../management/inspections/InspectionDetails';
 import ReportRepository from '../../management/reports/ReportRepository';
 import UserManagement from '../../management/users/UserManagement';
 import SettingsPage from '../../management/settings/SettingsPage';
+import NewInspectionPage from '../../management/inspections/NewInspectionPage';
+import InspectionAnalysisPage from '../../pages/InspectionAnalysisPage';
+import InspectionDeclarationsPage from '../../pages/InspectionDeclarationsPage';
+import InspectionViolationsPage from '../../pages/InspectionViolationsPage';
+import InspectionEvidencePage from '../../pages/InspectionEvidencePage';
+import InspectionReviewPage from '../../pages/InspectionReviewPage';
+import InspectionReportPage from '../../pages/InspectionReportPage';
 
 // Simple Route Guard to protect administrative sections
 const ProtectedRoute = ({ children }) => {
@@ -82,83 +89,17 @@ const AppRoutes = () => {
         {/* ---------------------------------------------------- */}
         {/* COMPLIANCE & SCANNING BRIDGES (Other Developer's Views) */}
         {/* ---------------------------------------------------- */}
-        <Route
-          path="inspection/new"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">New Product Scan</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                This is the packaging scanning, image upload, and OCR text extraction view. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
-        <Route
-          path="inspection/:id/analysis"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">Label Analysis View</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                Visualizing the OCR data segmentation outputs. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
-        <Route
-          path="inspection/:id/declarations"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">Mandatory Declarations Verification</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                Audit list showing passed and failed metrology fields. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
-        <Route
-          path="inspection/:id/violations"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">Flagged Label Violations</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                Reviewing critical metrology errors detected on the package layout. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
-        <Route
-          path="inspection/:id/evidence"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">Audit Evidence Viewer</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                Highlights specific text zones and measures character height. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
-        <Route
-          path="inspection/:id/review"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">Manual Review Panel</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                Reviewer validation sandbox for manual override checks. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
-        <Route
-          path="inspection/:id/report"
-          element={
-            <div className="bg-white p-8 border border-slate-200 rounded-lg text-center max-w-xl mx-auto mt-12 shadow-xs">
-              <h3 className="text-lg font-bold text-slate-900">Seizure Memo & Report Preview</h3>
-              <p className="text-sm text-slate-500 mt-2 leading-relaxed">
-                PDF document preview and digital signature sign-off. This module is managed by your partner.
-              </p>
-            </div>
-          }
-        />
+        <Route path="inspection/new" element={<NewInspectionPage />} />
+
+        {/* REPLACED PLACEHOLDER WITH REAL ANALYSIS PAGE */}
+        <Route path="inspection/:id/analysis" element={<InspectionAnalysisPage />} />
+
+        <Route path="inspection/:id/declarations" element={<InspectionDeclarationsPage />} />
+
+        <Route path="inspection/:id/violations" element={<InspectionViolationsPage />} />
+        <Route path="inspection/:id/evidence" element={<InspectionEvidencePage />} />
+        <Route path="inspection/:id/review" element={<InspectionReviewPage />} />
+        <Route path="inspection/:id/report" element={<InspectionReportPage />} />
       </Route>
 
       {/* Catch-all redirects unauthorized URL hits to login/dashboard */}
