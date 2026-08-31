@@ -1,3 +1,6 @@
+import cv2
+import numpy as np
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Any, Dict, List
@@ -5,8 +8,22 @@ from typing import Any, Dict, List
 from database.database import get_db
 from database import models
 from rule_engine.engine.compliance_engine import check_compliance
+from ai_service.ocr import OcrEngine
+from ai_service.preprocessing import resize_if_needed
+from ai_service.extractor import extract_fields
+from ai_service.normalizer import normalize_fields
+from ai_service.validator import validate_fields
+from ai_service.font_info import build_font_information
+from ai_service.schema import build_empty_result
+from ai_service.types import polygon_to_bbox
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# OCR engine singleton – instantiated once at startup so the PaddleOCR model
+# is loaded into memory only one time, not on every request.
+# ---------------------------------------------------------------------------
+_ocr_engine = OcrEngine()
 
 
 # ---------------------------------------------------------------------------
@@ -33,41 +50,72 @@ async def scan_label(
         }
     """
     # ------------------------------------------------------------------
-    # Mock OCR payload – replace with real OCR output from Member 1
+    # Decode the uploaded image bytes into an OpenCV numpy array.
+    # cv2.imdecode handles all common formats (JPEG, PNG, BMP, WEBP, …)
+    # without writing anything to disk.
     # ------------------------------------------------------------------
-    mock_ocr_input: Dict[str, Any] = {
-        "product": {
-            "manufacturer": "ABC Foods Pvt Ltd",
-            "address": "Nagpur, Maharashtra",
-            "mrp": "\u20b9120",
-            "net_quantity": "500 g",
-            "manufacturing_date": None,   # ← intentionally missing to demo FAIL
-            "consumer_care": "18001234567",
-            "country_of_origin": "India",
-        },
-        "confidence": {
-            "manufacturer": 0.98,
-            "address": 0.96,
-            "mrp": 0.99,
-            "net_quantity": 0.97,
-            "manufacturing_date": None,   # no OCR confidence for missing field
-            "consumer_care": 0.91,
-            "country_of_origin": 0.98,
-        },
-        "bounding_boxes": {
-            "manufacturer": [10, 20, 300, 50],
-            "address":       [10, 60, 300, 90],
-            "mrp":           [120, 450, 300, 500],
-            "net_quantity":  [10, 150, 200, 180],
-            "consumer_care": [10, 300, 250, 330],
-            "country_of_origin": [10, 350, 200, 380],
-        },
-    }
+    try:
+        image_bytes = await file.read()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        cv2_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if cv2_img is None:
+            raise ValueError(
+                "cv2.imdecode returned None – the file is not a valid image "
+                "or is in an unsupported format."
+            )
+
+        # Apply the one preprocessing step that is safe on numpy arrays and
+        # consistently helpful: downscale very large images. Contrast/denoise
+        # are skipped (both are opt-in in preprocessing.py and can hurt OCR).
+        cv2_img = resize_if_needed(cv2_img)
+
+        # ------------------------------------------------------------------
+        # Run PaddleOCR directly on the numpy array (OcrEngine.run() accepts
+        # Union[str, np.ndarray] – see ai_service/ocr.py line 38).  This
+        # bypasses OcrPipeline.run()'s os.path.isfile() gate entirely.
+        # ------------------------------------------------------------------
+        lines = _ocr_engine.run(cv2_img)
+
+        # Assemble the contract output dict the same way pipeline.py does
+        ocr_output: Dict[str, Any] = build_empty_result(scan_id=file.filename)
+        ocr_output["meta"]["image_path"] = file.filename
+        ocr_output["raw_ocr"] = [
+            {"text": l.text, "confidence": l.confidence, "bounding_box": l.box}
+            for l in lines
+        ]
+
+        if not lines:
+            ocr_output["meta"]["errors"].append(
+                "OCR returned no text – check image quality/lighting."
+            )
+        else:
+            extracted = extract_fields(lines)
+            normalized = normalize_fields(extracted)
+            for field, data in extracted.items():
+                ocr_output["product"][field] = normalized[field]
+                ocr_output["confidence"][field] = data["confidence"]
+                if data["box"] is not None:
+                    ocr_output["bounding_boxes"][field] = polygon_to_bbox(data["box"])
+            ocr_output["meta"]["errors"].extend(validate_fields(ocr_output["product"]))
+            ocr_output["font_information"] = build_font_information(lines)
+
+        # Log non-fatal OCR warnings – engine handles missing fields gracefully
+        if ocr_output["meta"]["errors"]:
+            print(f"[OCR warnings] {ocr_output['meta']['errors']}")
+
+    except HTTPException:
+        raise  # re-raise FastAPI errors unchanged
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OCR pipeline failed: {exc}",
+        ) from exc
 
     # ------------------------------------------------------------------
-    # Run the compliance engine
+    # Run the compliance engine on the real OCR output
     # ------------------------------------------------------------------
-    engine_result: Dict[str, Any] = check_compliance(mock_ocr_input)
+    engine_result: Dict[str, Any] = check_compliance(ocr_output)
     summary: Dict[str, Any] = engine_result.get("summary", {})
 
     # ------------------------------------------------------------------

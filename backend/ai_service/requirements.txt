@@ -1,0 +1,7 @@
+# Member 1 (AI/OCR) dependencies
+# Install with: python -m pip install -r ai_service/requirements.txt
+
+paddlepaddle
+paddleocr>=3.0.0
+opencv-python>=4.10.0
+numpy
