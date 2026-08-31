@@ -1,0 +1,23 @@
+# ==========================================
+# SIH26034 - Legal Metrology Compliance System
+# Python Dependencies
+# ==========================================
+
+# ---------- OCR / AI ----------
+paddlepaddle>=3.1.0
+paddleocr>=3.0.0
+
+# ---------- Image Processing ----------
+opencv-python>=4.10.0
+numpy
+
+# ---------- Backend ----------
+fastapi
+uvicorn
+
+# ---------- Database ----------
+sqlalchemy
+psycopg2-binary
+
+# ---------- Environment Variables ----------
+python-dotenv
