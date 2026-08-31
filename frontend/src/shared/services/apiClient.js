@@ -2,7 +2,7 @@
 // This helper handles requests to the FastAPI backend with an automatic fallback to local mock data 
 // if the backend server is offline or fails to respond.
 
-const BASE_URL = 'http://localhost:8000'; // Default FastAPI server port
+const BASE_URL = 'http://localhost:8000/api/v1'; // Default FastAPI server port
 
 export const apiRequest = async (endpoint, options = {}, fallbackData = null) => {
   const url = `${BASE_URL}${endpoint}`;
