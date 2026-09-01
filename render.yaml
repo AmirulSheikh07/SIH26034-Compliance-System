@@ -1,0 +1,30 @@
+databases:
+  - name: sih26034-db
+    databaseName: sih26034
+    user: sih26034_user
+
+services:
+  - type: web
+    name: sih26034-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sih26034-db
+          property: connectionString
+
+  - type: web
+    name: sih26034-frontend
+    env: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: sih26034-backend
+          envVarKey: RENDER_EXTERNAL_URL

@@ -122,7 +122,19 @@ const DashboardPage = () => {
     );
   }
 
-  const { summary, charts } = stats;
+  // Guard: stats may still be null on first render or after a failed fetch.
+  // Both branches below are already covered by the loading/error returns
+  // above, but this ensures no downstream access can ever throw if the API
+  // returns an unexpected shape.
+  if (!stats) return null;
+
+  const summary = stats.summary ?? {
+    totalInspections: 0, totalProducts: 0,
+    compliant: 0, nonCompliant: 0, warning: 0, pending: 0, totalViolations: 0,
+  };
+  const charts = stats.charts ?? {
+    complianceOverview: [], violationsBreakdown: [], trends: [],
+  };
 
   return (
     <div className="space-y-6 antialiased text-slate-850 dark:text-slate-200">

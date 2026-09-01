@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { 
   ArrowLeft, 
   ArrowRight, 
@@ -92,6 +92,7 @@ const MOCK_IMAGE_METADATA = {
 export default function InspectionEvidencePage() {
   const { id = 'INSP-2026-0891' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [selectedEvidenceId, setSelectedEvidenceId] = useState('EV-001');
   const [zoomLevel, setZoomLevel] = useState(1);
@@ -118,7 +119,7 @@ export default function InspectionEvidencePage() {
       {/* Navigation Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <button
-          onClick={() => navigate(`/inspection/${id}/violations`)}
+          onClick={() => navigate(`/inspection/${id}/violations`, location.state ? { state: location.state } : {})}
           className="inline-flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
@@ -126,7 +127,7 @@ export default function InspectionEvidencePage() {
         </button>
 
         <button
-          onClick={() => navigate(`/inspection/${id}/review`)}
+          onClick={() => navigate(`/inspection/${id}/review`, location.state ? { state: location.state } : {})}
           className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-5 py-2.5 rounded-lg shadow-xs hover:shadow-sm transition-all text-sm"
         >
           <span>Proceed to Manual Review</span>
