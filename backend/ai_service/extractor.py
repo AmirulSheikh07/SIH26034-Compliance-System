@@ -1,18 +1,20 @@
 """
-Stage 3: Field extraction (project spec section 9).
+Stage 3: Field extraction.
 
-Turns a flat list of OCR lines into the fields Member 2's Rule Engine
-expects. Approach: regex + keyword/context rules first -- only reach for
-an ML/NLP model later if this proves insufficient across enough real
-test images (spec sections 9 and 25, stage 9).
+Turns OCR lines into the fields expected by Member 2's Rule Engine.
 
-Rule: never invent a value. If nothing matches, return None (spec 11, 24).
+Important:
+- Never invent a value.
+- Prefer keyword/context-based extraction.
+- Country of origin is only extracted from an explicit "Made in ..."
+  declaration. A manufacturer address containing "India" is NOT enough.
 """
 
 import re
 from typing import List, Optional, Tuple
 
 from .types import OcrLine
+
 
 # value, confidence, bounding box
 Match = Tuple[Optional[str], Optional[float], Optional[list]]
@@ -22,334 +24,450 @@ def _no_match() -> Match:
     return None, None, None
 
 
-# --------------------------------------------------------------------------------
-# Individual field extractors
-# --------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MRP
+# ---------------------------------------------------------------------------
 
 def extract_mrp(lines: List[OcrLine]) -> Match:
     """
-    Extract MRP using the spatial relationship between the MRP label
-    and the nearby price value.
+    Handles:
+        MRP ₹699
+        MRP: ₹699
+        MRP Rs. 699
+        MRP INR 699
+        MRP
+        699.00
 
-    Handles cases where OCR separates:
-        MRP(incl.
-        of all taxes);
-        7699
-
-    and avoids selecting unrelated values such as:
-        71.17/ml
-        batch numbers
-        dates
-        USP values
+    The bare-decimal fallback is only searched near an MRP keyword.
     """
 
     amount_pattern = re.compile(
-        r"(?:₹|Rs\.?|INR)\s*(\d+(?:[.,]\d{1,2})?)",
+        r"(?:₹|Rs\.?|INR)\s*"
+        r"(\d+(?:[.,]\d{1,2})?)",
         re.IGNORECASE,
     )
 
-    number_pattern = re.compile(
-        r"(?<![\w/])(\d{2,5}(?:[.,]\d{1,2})?)(?![\w/])"
+    bare_decimal_pattern = re.compile(
+        r"\b(\d{1,5}\.\d{2})\b"
     )
 
-    # Find the MRP label.
     for i, line in enumerate(lines):
 
         if "mrp" not in line.text.lower():
             continue
 
-        # ---------------------------------------------------------------
-        # 1. MRP and price on the SAME OCR line
-        # ---------------------------------------------------------------
-        m = amount_pattern.search(line.text)
+        # Same line
+        match = amount_pattern.search(line.text)
 
-        if m:
-            return (
-                f"₹{m.group(1)}",
-                line.confidence,
-                line.box,
-            )
+        if match:
+            amount = match.group(1).replace(",", ".")
+            return f"₹{amount}", line.confidence, line.box
 
-        # ---------------------------------------------------------------
-        # 2. Look at the nearby OCR lines.
-        # ---------------------------------------------------------------
-        candidates = []
+        # Nearby lines
+        search_window = lines[i + 1:i + 6]
 
-        for j in range(i + 1, min(i + 6, len(lines))):
+        for nxt in search_window:
+            match = amount_pattern.search(nxt.text)
 
-            candidate = lines[j]
-            text = candidate.text.strip()
-            lower = text.lower()
+            if match:
+                amount = match.group(1).replace(",", ".")
+                return f"₹{amount}", nxt.confidence, nxt.box
 
-            # Don't confuse USP/per-unit price with MRP.
-            if "usp" in lower:
-                continue
+        # OCR sometimes loses ₹ / Rs
+        for nxt in search_window:
+            match = bare_decimal_pattern.search(nxt.text)
 
-            # Don't use batch/date/manufacturing numbers.
-            if any(keyword in lower for keyword in [
-                "batch",
-                "mfd",
-                "manufactur",
-                "use before",
-                "license",
-                "lic.",
-            ]):
-                continue
+            if match:
+                return f"₹{match.group(1)}", nxt.confidence, nxt.box
 
-            # First prefer explicit currency values.
-            match = amount_pattern.search(text)
+    # General currency fallback
+    for line in lines:
+        match = amount_pattern.search(line.text)
 
-            # Otherwise allow a bare number because OCR may lose ₹.
-            if not match:
-                match = number_pattern.search(text)
-
-            if not match:
-                continue
-
-            value = match.group(1)
-
-            # -----------------------------------------------------------
-            # Give preference to values that are physically close to MRP.
-            # -----------------------------------------------------------
-            try:
-                mrp_box = line.box
-                candidate_box = candidate.box
-
-                mrp_x1 = min(p[0] for p in mrp_box)
-                mrp_y1 = min(p[1] for p in mrp_box)
-
-                candidate_x1 = min(p[0] for p in candidate_box)
-                candidate_y1 = min(p[1] for p in candidate_box)
-
-                vertical_distance = abs(candidate_y1 - mrp_y1)
-                horizontal_distance = abs(candidate_x1 - mrp_x1)
-
-            except (TypeError, ValueError):
-                vertical_distance = 999
-                horizontal_distance = 999
-
-            # MRP price should be reasonably close to its label.
-            if vertical_distance > 150:
-                continue
-
-            score = 0
-
-            # Strong preference for a value to the right of MRP.
-            if candidate_x1 > mrp_x1:
-                score += 100
-
-            # Closer values are better.
-            score -= vertical_distance * 0.5
-            score -= horizontal_distance * 0.1
-
-            # Explicit currency is strong evidence.
-            if amount_pattern.search(text):
-                score += 100
-
-            candidates.append(
-                (score, candidate, value)
-            )
-
-        if candidates:
-
-            candidates.sort(
-                key=lambda item: item[0],
-                reverse=True
-            )
-
-            _, best_line, value = candidates[0]
-
-            # OCR sometimes reads ₹699 as 7699.
-            # Only correct this very specific OCR pattern when it
-            # occurs in the MRP context.
-            if re.fullmatch(r"7\d{3}", value):
-                value = value[1:]
-
-            return (
-                f"₹{value}",
-                best_line.confidence,
-                best_line.box,
-            )
+        if match:
+            amount = match.group(1).replace(",", ".")
+            return f"₹{amount}", line.confidence, line.box
 
     return _no_match()
+
+
+# ---------------------------------------------------------------------------
+# NET QUANTITY
+# ---------------------------------------------------------------------------
 
 def extract_net_quantity(lines: List[OcrLine]) -> Match:
-    """Handles: 500g, 500 g, Net Wt. 500g, Net Quantity: 500 g, 900g, 1 kg, 250 ml"""
-    qty_pattern = re.compile(r"(\d+(?:\.\d+)?)\s?(kg|g|ml|l|litre|liter)\b", re.IGNORECASE)
-
-    for i, line in enumerate(lines):
-        lower = line.text.lower()
-        if "net" in lower and ("wt" in lower or "quantity" in lower or "qty" in lower):
-            m = qty_pattern.search(line.text)
-            if m:
-                return f"{m.group(1)} {m.group(2).lower()}", line.confidence, line.box
-            for nxt in lines[i + 1 : i + 3]:
-                m = qty_pattern.search(nxt.text)
-                if m:
-                    return f"{m.group(1)} {m.group(2).lower()}", nxt.confidence, nxt.box
-
-    # fallback: a standalone weight/volume token anywhere (risky but useful)
-    for line in lines:
-        m = qty_pattern.fullmatch(line.text.strip())
-        if m:
-            return f"{m.group(1)} {m.group(2).lower()}", line.confidence, line.box
-
-    return _no_match()
-
-
-def extract_manufacturer(lines: List[OcrLine]) -> Match:
     """
-    Looks for 'Mfd. By', 'Manufactured by', 'Marketed by', or a Ltd/Limited
-    company name. Also falls back to the text right before a 'Regn. No'
-    (license/registration number) line, which is present on most Indian
-    labels even when the 'Mfd. By' line itself wasn't detected by OCR --
-    confirmed on real test data where 'Mfd.By:Emami Limited...' was
-    entirely missing from one OCR pass, but 'EmamiLd.Regn.No....' still
-    was, with 'Ltd.' misread as 'Ld.'. Suffix cleanup happens in
-    normalizer.py rather than here, since OCR misspells this suffix
-    inconsistently (Ltd./Lid./Ld.) and word-boundary regex can't reliably
-    catch it when OCR also drops the space before it.
+    Handles:
+        500g
+        500 g
+        Net Wt. 500g
+        Net Quantity: 500 g
+        Net Qty.: 200 ml
+        1 kg
+        250 ml
+        1 litre
     """
-    keyword_pattern = re.compile(
-        r"(?:mfd\.?\s*by|manufactured\s*by|marketed\s*by|packed\s*by)[:\s]*(.+)",
+
+    qty_pattern = re.compile(
+        r"(\d+(?:\.\d+)?)\s*"
+        r"(kg|g|mg|ml|l|litre|liter)\b",
         re.IGNORECASE,
     )
-    for line in lines:
-        m = keyword_pattern.search(line.text)
-        if m and m.group(1).strip():
-            return m.group(1).strip(" .,:"), line.confidence, line.box
-
-    regn_pattern = re.compile(r"regn\.?\s*no", re.IGNORECASE)
-    for line in lines:
-        m = regn_pattern.search(line.text)
-        if m:
-            before = line.text[: m.start()].strip(" .,:")
-            if before:
-                return before, line.confidence, line.box
-
-    company_pattern = re.compile(r"([A-Z][A-Za-z&.\s]{2,60}(?:Pvt\.?\s?Ltd\.?|Limited|Ltd\.?))")
-    for line in lines:
-        m = company_pattern.search(line.text)
-        if m:
-            return m.group(1).strip(), line.confidence, line.box
-
-    return _no_match()
-
-
-def extract_manufacturing_date(lines: List[OcrLine]) -> Match:
-    """
-    Extract manufacturing date from labels such as:
-
-        MFD: 06/2026
-        MFD 06-2026
-        Mfg. Date: 12/2025
-        M 07/24 21:25
-
-    Supports both MM/YYYY and MM/YY formats.
-    """
-
-    date_pattern = re.compile(
-        r"\b(\d{1,2}[/-]\d{2,4})\b"
-    )
 
     for i, line in enumerate(lines):
 
         lower = line.text.lower()
 
-        # Look for manufacturing-date anchors.
-        if any(keyword in lower for keyword in [
-            "mfd",
-            "mfg",
-            "manufactur",
-            "manufacturing",
-        ]):
-
-            # Check the anchor line itself.
-            match = date_pattern.search(line.text)
+        if (
+            "net" in lower
+            and (
+                "wt" in lower
+                or "quantity" in lower
+                or "qty" in lower
+                or "content" in lower
+            )
+        ):
+            # Same line
+            match = qty_pattern.search(line.text)
 
             if match:
                 return (
-                    match.group(1),
+                    f"{match.group(1)} {match.group(2).lower()}",
                     line.confidence,
                     line.box,
                 )
 
-            # The date is often printed on the next OCR line.
-            for nxt in lines[i + 1:i + 4]:
+            # Next few OCR lines
+            for nxt in lines[i + 1:i + 3]:
 
-                match = date_pattern.search(nxt.text)
+                match = qty_pattern.search(nxt.text)
 
                 if match:
                     return (
-                        match.group(1),
+                        f"{match.group(1)} {match.group(2).lower()}",
                         nxt.confidence,
                         nxt.box,
                     )
 
+    # Standalone quantity fallback
+    for line in lines:
+
+        match = qty_pattern.fullmatch(line.text.strip())
+
+        if match:
+            return (
+                f"{match.group(1)} {match.group(2).lower()}",
+                line.confidence,
+                line.box,
+            )
+
     return _no_match()
 
-def extract_consumer_care(lines: List[OcrLine]) -> Match:
-    """
-    Extract the consumer-care telephone number.
 
-    Phone numbers are preferred over email addresses.
-    The existing consumer_care field continues to contain the phone
-    number so the Rule Engine contract remains unchanged.
+# ---------------------------------------------------------------------------
+# MANUFACTURER
+# ---------------------------------------------------------------------------
+
+def extract_manufacturer(lines: List[OcrLine]) -> Match:
+    """
+    Handles:
+
+        Manufactured by: ABC Pvt. Ltd.
+
+    and importantly:
+
+        Manufactured by:
+        ABC Pvt. Ltd.
+
+    Also handles:
+
+        Mfd. by: ABC
+        Marketed by: ABC
+        Packed by: ABC
+
+    The value may be on the next OCR line.
     """
 
-    # Indian landline/mobile patterns.
-    # Require either:
-    #   (022)62487999
-    #   022-62487999
-    #   022 62487999
-    #   10-digit mobile number
-    #
-    # This intentionally does NOT accept a bare 6-digit number,
-    # because Indian PIN codes are also 6 digits.
-    phone_pattern = re.compile(
-        r"""
-        (?:
-            \(\s*\d{2,4}\s*\)\s*\d{6,8}
-            |
-            \b\d{2,4}[-\s]\d{6,8}\b
-            |
-            \b[6-9]\d{9}\b
-        )
-        """,
-        re.VERBOSE,
+    keyword_pattern = re.compile(
+        r"(?:"
+        r"mfd\.?\s*by"
+        r"|manufactured\s*by"
+        r"|marketed\s*by"
+        r"|packed\s*by"
+        r")"
+        r"\s*:?\s*(.*)",
+        re.IGNORECASE,
     )
 
-    # First search around consumer-care/contact-related text.
+    # --------------------------------------------------
+    # 1. Keyword-based extraction
+    # --------------------------------------------------
+
+    for i, line in enumerate(lines):
+
+        match = keyword_pattern.search(line.text)
+
+        if not match:
+            continue
+
+        value = match.group(1).strip(" .,:;-")
+
+        # Manufacturer is on the SAME line
+        if value:
+            return value, line.confidence, line.box
+
+        # Manufacturer is on the NEXT OCR line
+        for nxt in lines[i + 1:i + 4]:
+
+            value = nxt.text.strip(" .,:;-")
+
+            if not value:
+                continue
+
+            lower = value.lower()
+
+            # Do not accidentally take another field
+            stop_keywords = [
+                "mrp",
+                "net qty",
+                "net quantity",
+                "net wt",
+                "batch",
+                "date",
+                "expiry",
+                "use before",
+                "consumer care",
+                "toll free",
+                "e-mail",
+                "email",
+                "website",
+                "regd.",
+                "regn.",
+            ]
+
+            if any(keyword in lower for keyword in stop_keywords):
+                break
+
+            return value, nxt.confidence, nxt.box
+
+    # --------------------------------------------------
+    # 2. Registration-number fallback
+    # --------------------------------------------------
+
+    regn_pattern = re.compile(
+        r"reg(?:n|istration)\.?\s*no",
+        re.IGNORECASE,
+    )
+
+    for line in lines:
+
+        match = regn_pattern.search(line.text)
+
+        if match:
+
+            before = line.text[:match.start()].strip(" .,:;-")
+
+            if before:
+                return before, line.confidence, line.box
+
+    # --------------------------------------------------
+    # 3. Company-name fallback
+    # --------------------------------------------------
+
+    company_pattern = re.compile(
+        r"\b"
+        r"([A-Z][A-Za-z0-9&.,()' -]{2,80}"
+        r"(?:Pvt\.?\s*Ltd\.?|"
+        r"Private\s+Limited|"
+        r"Limited|"
+        r"Ltd\.?|"
+        r"Laboratories))"
+        r"\b",
+        re.IGNORECASE,
+    )
+
+    for line in lines:
+
+        match = company_pattern.search(line.text)
+
+        if match:
+            value = match.group(1).strip(" .,:;-")
+            return value, line.confidence, line.box
+
+    return _no_match()
+
+
+# ---------------------------------------------------------------------------
+# MANUFACTURING DATE
+# ---------------------------------------------------------------------------
+
+def extract_manufacturing_date(lines: List[OcrLine]) -> Match:
+    """
+    Handles:
+
+        06/2026
+        07/24
+        09/2025
+        MFD 06/2026
+        Mfg. Date: 12/2025
+        MFD.(M)& M 07/24
+
+    IMPORTANT:
+    Expiry dates are not used unless they are attached to an
+    explicit manufacturing-date keyword.
+    """
+
+    date_pattern = re.compile(
+        r"\b("
+        r"\d{1,2}[/-]\d{2,4}"
+        r"|"
+        r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+        r")\b"
+    )
+
     for i, line in enumerate(lines):
 
         lower = line.text.lower()
 
-        if any(keyword in lower for keyword in [
-            "consumer",
-            "care",
-            "contact",
-            "query",
-            "feedback",
-        ]):
+        is_manufacturing_context = (
+            "mfd" in lower
+            or "mfg" in lower
+            or "manufactur" in lower
+            or "date of mfg" in lower
+            or "date of manufacturing" in lower
+        )
 
-            # Search the anchor line and following few lines.
-            for candidate in lines[i:i + 6]:
+        if not is_manufacturing_context:
+            continue
 
-                match = phone_pattern.search(candidate.text)
+        # Same line
+        match = date_pattern.search(line.text)
+
+        if match:
+            return (
+                match.group(1),
+                line.confidence,
+                line.box,
+            )
+
+        # Next few lines
+        for nxt in lines[i + 1:i + 3]:
+
+            match = date_pattern.search(nxt.text)
+
+            if match:
+                return (
+                    match.group(1),
+                    nxt.confidence,
+                    nxt.box,
+                )
+
+    return _no_match()
+
+
+# ---------------------------------------------------------------------------
+# CONSUMER CARE
+# ---------------------------------------------------------------------------
+
+def extract_consumer_care(lines: List[OcrLine]) -> Match:
+    """
+    Extracts a consumer-care phone number.
+
+    Handles:
+
+        18001800108
+        1800 1800 108
+        (022)62487999
+        022-62487999
+        1800-123-4567
+
+    Also supports email as a fallback.
+
+    Phone is preferred because Member 2's validator checks the
+    consumer-care field for a valid contact number.
+    """
+
+    email_pattern = re.compile(
+        r"[\w.+-]+@[\w-]+\.[\w.-]+",
+        re.IGNORECASE,
+    )
+
+    # Indian-style phone / toll-free numbers
+    phone_patterns = [
+        re.compile(r"(?<!\d)\d{10,12}(?!\d)"),
+        re.compile(r"\(?0\d{2,5}\)?[-\s]?\d{6,8}"),
+    ]
+
+    # --------------------------------------------------
+    # 1. Search lines containing consumer-care context
+    # --------------------------------------------------
+
+    consumer_context = (
+        "consumer care",
+        "customer care",
+        "toll free",
+        "helpline",
+        "contact",
+        "query",
+        "feedback",
+    )
+
+    for i, line in enumerate(lines):
+
+        lower = line.text.lower()
+
+        if not any(keyword in lower for keyword in consumer_context):
+            continue
+
+        # Search current line + next few lines
+        nearby = lines[i:i + 4]
+
+        for candidate in nearby:
+
+            # Prefer phone number
+            for pattern in phone_patterns:
+
+                match = pattern.search(candidate.text)
 
                 if match:
+                    phone = match.group(0).strip()
+
                     return (
-                        match.group(0),
+                        phone,
                         candidate.confidence,
                         candidate.box,
                     )
 
-    # General phone fallback.
+    # --------------------------------------------------
+    # 2. General phone-number fallback
+    # --------------------------------------------------
+
     for line in lines:
 
-        match = phone_pattern.search(line.text)
+        for pattern in phone_patterns:
+
+            match = pattern.search(line.text)
+
+            if match:
+
+                phone = match.group(0).strip()
+
+                return (
+                    phone,
+                    line.confidence,
+                    line.box,
+                )
+
+    # --------------------------------------------------
+    # 3. Email fallback
+    # --------------------------------------------------
+
+    for line in lines:
+
+        match = email_pattern.search(line.text)
 
         if match:
+
             return (
                 match.group(0),
                 line.confidence,
@@ -357,107 +475,336 @@ def extract_consumer_care(lines: List[OcrLine]) -> Match:
             )
 
     return _no_match()
+
+
+# ---------------------------------------------------------------------------
+# COUNTRY OF ORIGIN
+# ---------------------------------------------------------------------------
+
 def extract_country_of_origin(lines: List[OcrLine]) -> Match:
-    made_in_pattern = re.compile(r"made\s*in\s*([A-Za-z]+)", re.IGNORECASE)
+    """
+    IMPORTANT:
+
+    Only accept an explicit country-of-origin declaration.
+
+    Valid examples:
+
+        Made in India
+        MADE IN INDIA
+        Made in: India
+        Country of Origin: India
+        Country of Origin India
+
+    DO NOT infer country from:
+
+        HAMDARD LABORATORIES (INDIA)
+
+    because "India" in a manufacturer/company name is not necessarily
+    a country-of-origin declaration.
+    """
+
+    made_in_pattern = re.compile(
+        r"\bmade\s+in\s*:?\s*([A-Za-z][A-Za-z .'-]*)",
+        re.IGNORECASE,
+    )
+
+    country_pattern = re.compile(
+        r"\bcountry\s+of\s+origin\s*:?\s*"
+        r"([A-Za-z][A-Za-z .'-]*)",
+        re.IGNORECASE,
+    )
 
     for line in lines:
-        m = made_in_pattern.search(line.text)
-        if m:
-            return m.group(1).strip(), line.confidence, line.box
 
-    # weaker fallback -- a bare "India" mention is a lower-confidence signal
-    for line in lines:
-        if re.search(r"\bIndia\b", line.text):
-            return "India", line.confidence, line.box
+        # --------------------------------------------------
+        # Made in India
+        # --------------------------------------------------
+
+        match = made_in_pattern.search(line.text)
+
+        if match:
+
+            country = match.group(1).strip(" .,:;-")
+
+            # Remove trailing declaration-like text
+            country = re.split(
+                r"\b(?:batch|mrp|mfg|mfd|date|expiry)\b",
+                country,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip(" .,:;-")
+
+            if country:
+                return (
+                    country,
+                    line.confidence,
+                    line.box,
+                )
+
+        # --------------------------------------------------
+        # Country of Origin: India
+        # --------------------------------------------------
+
+        match = country_pattern.search(line.text)
+
+        if match:
+
+            country = match.group(1).strip(" .,:;-")
+
+            if country:
+                return (
+                    country,
+                    line.confidence,
+                    line.box,
+                )
+
+    # NO generic "India" fallback here.
+    #
+    # Example:
+    # HAMDARD LABORATORIES (INDIA)
+    #
+    # should NOT automatically mean:
+    # country_of_origin = India
 
     return _no_match()
 
 
+# ---------------------------------------------------------------------------
+# ADDRESS
+# ---------------------------------------------------------------------------
+
 def extract_address(lines: List[OcrLine]) -> Match:
     """
-    Extract a multi-line address using labels such as:
-    Marketed by, Manufactured by, Address and Add.
+    Extract the manufacturer's address from Indian product labels.
 
-    Stops at unrelated fields while preserving address text that
-    appears before another section on the same OCR line.
+    Handles structures such as:
+
+        Manufactured by:
+        COMPANY NAME
+        B-1/2/3, Meerut Road, Industrial Area,
+        Ghaziabad-201003 (U.P.)
+
+    Also handles:
+
+        Add.: COMPANY NAME, ADDRESS, PIN
+
+    Strategy:
+    1. Prefer an address explicitly associated with "Add".
+    2. Otherwise find "Manufactured by"/"Mfd. by"/"Packed by"
+       and collect the following lines up to the PIN code.
+    3. Remove the manufacturer/company name from the address.
+    4. Stop before unrelated fields such as Consumer Care.
     """
-
-    anchor_pattern = re.compile(
-        r"\b(?:marketed\s+by|manufactured\s+by|address|add\.?)\s*[:\-]?",
-        re.IGNORECASE,
-    )
 
     pincode_pattern = re.compile(r"\b\d{6}\b")
 
-    stop_pattern = re.compile(
-        r"\b(?:mrp|net\s+content|net\s+quantity|batch\s+no|"
-        r"mfd|mfg\.?\s*lic|use\s+before|country\s+of\s+origin|"
-        r"query\s*/?\s*feedback|consumer\s+care|contact)\b",
+    address_keyword_pattern = re.compile(
+        r"\badd\.?\s*[:\-]?",
         re.IGNORECASE,
     )
 
-    for i, line in enumerate(lines):
+    manufacturer_keyword_pattern = re.compile(
+        r"(?:"
+        r"mfd\.?\s*by"
+        r"|manufactured\s*by"
+        r"|packed\s*by"
+        r"|marketed\s*by"
+        r")"
+        r"\s*:?",
+        re.IGNORECASE,
+    )
 
-        if not anchor_pattern.search(line.text):
+    stop_pattern = re.compile(
+        r"(?:"
+        r"mrp"
+        r"|net\s*(?:qty|quantity|wt)"
+        r"|batch"
+        r"|date\s+of\s+(?:mfg|manufactur|expiry)"
+        r"|expiry"
+        r"|use\s+before"
+        r"|consumer\s+care"
+        r"|toll\s+free"
+        r"|e[-\s]?mail"
+        r"|email"
+        r"|website"
+        r"|regd\.?"
+        r"|regn\.?"
+        r")",
+        re.IGNORECASE,
+    )
+
+    def clean(text: str) -> str:
+        text = text.strip()
+        text = re.sub(r"^[\s:,\-;.]+", "", text)
+        text = re.sub(r"[\s,;]+$", "", text)
+        return text.strip()
+
+    # ------------------------------------------------------------
+    # 1. Explicit "Add:" address
+    # ------------------------------------------------------------
+
+    for i, line in enumerate(lines):
+        match = address_keyword_pattern.search(line.text)
+
+        if not match:
             continue
 
         parts = []
-        confidences = []
 
-        for j in range(i, min(i + 8, len(lines))):
+        # Text after "Add:"
+        same_line = clean(line.text[match.end():])
 
-            text = lines[j].text.strip()
+        if same_line:
+            parts.append(same_line)
+
+            # If the same line already contains a PIN code,
+            # this is a complete address.
+            if pincode_pattern.search(same_line):
+                return (
+                    " ".join(parts),
+                    line.confidence,
+                    line.box,
+                )
+
+        # Continue through the following OCR lines until PIN code.
+        for nxt in lines[i + 1:i + 8]:
+            text = clean(nxt.text)
 
             if not text:
                 continue
 
-            # Remove the address anchor from the first line.
-            if j == i:
-                text = anchor_pattern.sub("", text, count=1).strip()
-
-            if not text:
-                continue
-
-            # If another section starts on this line, keep only the
-            # address text before that section.
-            if j > i:
-                stop_match = stop_pattern.search(text)
-
-                if stop_match:
-                    text = text[:stop_match.start()].strip()
-
-                    if text:
-                        parts.append(text)
-                        confidences.append(lines[j].confidence)
-
-                    break
+            if stop_pattern.search(text):
+                break
 
             parts.append(text)
-            confidences.append(lines[j].confidence)
 
-            # Indian addresses normally end with a 6-digit PIN.
             if pincode_pattern.search(text):
                 combined = " ".join(parts)
+                confidence = min(
+                    [line.confidence] +
+                    [x.confidence for x in lines[i + 1:i + 8]
+                     if clean(x.text) and not stop_pattern.search(clean(x.text))]
+                )
 
                 return (
-                    combined.strip(" .,"),
-                    min(confidences),
-                    lines[i].box,
+                    combined,
+                    confidence,
+                    nxt.box,
                 )
+
+    # ------------------------------------------------------------
+    # 2. Address following "Manufactured by"
+    # ------------------------------------------------------------
+
+    for i, line in enumerate(lines):
+        match = manufacturer_keyword_pattern.search(line.text)
+
+        if not match:
+            continue
+
+        manufacturer_name = clean(line.text[match.end():])
+
+        collected = []
+        confidence_values = []
+        address_started = False
+
+        # Start checking lines after "Manufactured by:"
+        for nxt in lines[i + 1:i + 8]:
+            text = clean(nxt.text)
+
+            if not text:
+                continue
+
+            # Stop at unrelated fields.
+            if stop_pattern.search(text):
+                break
+
+            # The first line is normally the manufacturer/company name.
+            # Skip it and begin collecting the address from the next line.
+            if not address_started:
+                address_started = True
+
+                # If the first line itself contains a PIN code,
+                # it may contain the complete address.
+                if pincode_pattern.search(text):
+                    return (
+                        text,
+                        nxt.confidence,
+                        nxt.box,
+                    )
+
+                continue
+
+            collected.append(text)
+            confidence_values.append(nxt.confidence)
+
+            # Address normally ends at the PIN code.
+            if pincode_pattern.search(text):
+                if collected:
+                    return (
+                        " ".join(collected),
+                        min(confidence_values),
+                        nxt.box,
+                    )
+
+    # ------------------------------------------------------------
+    # 3. Generic PIN-code fallback
+    # ------------------------------------------------------------
+
+    # Look backwards from a PIN-code line for address-like lines.
+    for i, line in enumerate(lines):
+        if not pincode_pattern.search(line.text):
+            continue
+
+        parts = []
+        confidence_values = []
+
+        for j in range(max(0, i - 4), i + 1):
+            text = clean(lines[j].text)
+
+            if not text:
+                continue
+
+            if stop_pattern.search(text):
+                continue
+
+            parts.append(text)
+            confidence_values.append(lines[j].confidence)
 
         if parts:
             combined = " ".join(parts)
 
-            return (
-                combined.strip(" .,"),
-                min(confidences),
-                lines[i].box,
-            )
+            # Avoid returning obviously unrelated text.
+            if (
+                any(word in combined.lower() for word in [
+                    "road",
+                    "road,",
+                    "area",
+                    "nagar",
+                    "market",
+                    "industrial",
+                    "mumbai",
+                    "delhi",
+                    "ghaziabad",
+                    "maharashtra",
+                    "uttar",
+                    "pradesh",
+                    "madhya",
+                    "india",
+                ])
+                or len(combined) > 25
+            ):
+                return (
+                    combined,
+                    min(confidence_values),
+                    line.box,
+                )
 
     return _no_match()
-# --------------------------------------------------------------------------------
-# Orchestrator
-# --------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# FIELD EXTRACTORS
+# ---------------------------------------------------------------------------
 
 FIELD_EXTRACTORS = {
     "manufacturer": extract_manufacturer,
@@ -470,13 +817,35 @@ FIELD_EXTRACTORS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# ORCHESTRATOR
+# ---------------------------------------------------------------------------
+
 def extract_fields(lines: List[OcrLine]) -> dict:
     """
-    Runs every field extractor against the same OCR line list.
-    Returns {field: {"value": ..., "confidence": ..., "box": ...}}
+    Run every field extractor against the same OCR line list.
+
+    Returns:
+
+    {
+        "field": {
+            "value": ...,
+            "confidence": ...,
+            "box": ...
+        }
+    }
     """
+
     results = {}
+
     for field, extractor in FIELD_EXTRACTORS.items():
+
         value, confidence, box = extractor(lines)
-        results[field] = {"value": value, "confidence": confidence, "box": box}
+
+        results[field] = {
+            "value": value,
+            "confidence": confidence,
+            "box": box,
+        }
+
     return results
