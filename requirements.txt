@@ -1,0 +1,4 @@
+# ---------- Backend ----------
+fastapi
+uvicorn
+python-multipart

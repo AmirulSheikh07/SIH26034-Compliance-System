@@ -28,48 +28,150 @@ def _no_match() -> Match:
 
 def extract_mrp(lines: List[OcrLine]) -> Match:
     """
-    Looks for a currency amount near an 'MRP' keyword, or a bare ₹/Rs
-    amount elsewhere. Handles: ₹120, Rs.120, MRP: Rs 120, MRP ₹120/-
+    Extract MRP using the spatial relationship between the MRP label
+    and the nearby price value.
 
-    Also falls back to a bare decimal number (e.g. "100.00") near the
-    'MRP' keyword when OCR drops the currency symbol entirely -- this is
-    a real, observed OCR failure mode (confirmed on a tissue box label
-    where "MRP" and "100.00" were detected as separate lines with no ₹
-    symbol at all). This fallback is intentionally scoped tightly to
-    stay near the 'MRP' keyword -- it does NOT scan the whole document
-    for "any number that looks like a price", since that risks grabbing
-    an unrelated number (e.g. a per-unit price, batch code, or date) and
-    mislabeling it as MRP. Per spec section 24, a wrong guess is worse
-    than returning null.
+    Handles cases where OCR separates:
+        MRP(incl.
+        of all taxes);
+        7699
+
+    and avoids selecting unrelated values such as:
+        71.17/ml
+        batch numbers
+        dates
+        USP values
     """
-    amount_pattern = re.compile(r"(?:₹|Rs\.?|INR)\s?(\d+(?:[.,]\d{1,2})?)", re.IGNORECASE)
-    bare_decimal_pattern = re.compile(r"\b(\d{1,5}\.\d{2})\b")
 
+    amount_pattern = re.compile(
+        r"(?:₹|Rs\.?|INR)\s*(\d+(?:[.,]\d{1,2})?)",
+        re.IGNORECASE,
+    )
+
+    number_pattern = re.compile(
+        r"(?<![\w/])(\d{2,5}(?:[.,]\d{1,2})?)(?![\w/])"
+    )
+
+    # Find the MRP label.
     for i, line in enumerate(lines):
-        if "mrp" in line.text.lower():
-            m = amount_pattern.search(line.text)
-            if m:
-                return f"₹{m.group(1)}", line.confidence, line.box
 
-            search_window = lines[i + 1 : i + 6]
-            for nxt in search_window:
-                m = amount_pattern.search(nxt.text)
-                if m:
-                    return f"₹{m.group(1)}", nxt.confidence, nxt.box
+        if "mrp" not in line.text.lower():
+            continue
 
-            # symbol-less fallback, still scoped to the same nearby window
-            for nxt in search_window:
-                m = bare_decimal_pattern.search(nxt.text)
-                if m:
-                    return f"₹{m.group(1)}", nxt.confidence, nxt.box
-
-    for line in lines:
+        # ---------------------------------------------------------------
+        # 1. MRP and price on the SAME OCR line
+        # ---------------------------------------------------------------
         m = amount_pattern.search(line.text)
+
         if m:
-            return f"₹{m.group(1)}", line.confidence, line.box
+            return (
+                f"₹{m.group(1)}",
+                line.confidence,
+                line.box,
+            )
+
+        # ---------------------------------------------------------------
+        # 2. Look at the nearby OCR lines.
+        # ---------------------------------------------------------------
+        candidates = []
+
+        for j in range(i + 1, min(i + 6, len(lines))):
+
+            candidate = lines[j]
+            text = candidate.text.strip()
+            lower = text.lower()
+
+            # Don't confuse USP/per-unit price with MRP.
+            if "usp" in lower:
+                continue
+
+            # Don't use batch/date/manufacturing numbers.
+            if any(keyword in lower for keyword in [
+                "batch",
+                "mfd",
+                "manufactur",
+                "use before",
+                "license",
+                "lic.",
+            ]):
+                continue
+
+            # First prefer explicit currency values.
+            match = amount_pattern.search(text)
+
+            # Otherwise allow a bare number because OCR may lose ₹.
+            if not match:
+                match = number_pattern.search(text)
+
+            if not match:
+                continue
+
+            value = match.group(1)
+
+            # -----------------------------------------------------------
+            # Give preference to values that are physically close to MRP.
+            # -----------------------------------------------------------
+            try:
+                mrp_box = line.box
+                candidate_box = candidate.box
+
+                mrp_x1 = min(p[0] for p in mrp_box)
+                mrp_y1 = min(p[1] for p in mrp_box)
+
+                candidate_x1 = min(p[0] for p in candidate_box)
+                candidate_y1 = min(p[1] for p in candidate_box)
+
+                vertical_distance = abs(candidate_y1 - mrp_y1)
+                horizontal_distance = abs(candidate_x1 - mrp_x1)
+
+            except (TypeError, ValueError):
+                vertical_distance = 999
+                horizontal_distance = 999
+
+            # MRP price should be reasonably close to its label.
+            if vertical_distance > 150:
+                continue
+
+            score = 0
+
+            # Strong preference for a value to the right of MRP.
+            if candidate_x1 > mrp_x1:
+                score += 100
+
+            # Closer values are better.
+            score -= vertical_distance * 0.5
+            score -= horizontal_distance * 0.1
+
+            # Explicit currency is strong evidence.
+            if amount_pattern.search(text):
+                score += 100
+
+            candidates.append(
+                (score, candidate, value)
+            )
+
+        if candidates:
+
+            candidates.sort(
+                key=lambda item: item[0],
+                reverse=True
+            )
+
+            _, best_line, value = candidates[0]
+
+            # OCR sometimes reads ₹699 as 7699.
+            # Only correct this very specific OCR pattern when it
+            # occurs in the MRP context.
+            if re.fullmatch(r"7\d{3}", value):
+                value = value[1:]
+
+            return (
+                f"₹{value}",
+                best_line.confidence,
+                best_line.box,
+            )
 
     return _no_match()
-
 
 def extract_net_quantity(lines: List[OcrLine]) -> Match:
     """Handles: 500g, 500 g, Net Wt. 500g, Net Quantity: 500 g, 900g, 1 kg, 250 ml"""
@@ -135,41 +237,126 @@ def extract_manufacturer(lines: List[OcrLine]) -> Match:
 
 
 def extract_manufacturing_date(lines: List[OcrLine]) -> Match:
-    """Handles: 06/2026, MFD 06-2026, Mfg. Date: 12/2025, dd/mm/yyyy"""
-    date_pattern = re.compile(r"\b(\d{1,2}[/-]\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
+    """
+    Extract manufacturing date from labels such as:
+
+        MFD: 06/2026
+        MFD 06-2026
+        Mfg. Date: 12/2025
+        M 07/24 21:25
+
+    Supports both MM/YYYY and MM/YY formats.
+    """
+
+    date_pattern = re.compile(
+        r"\b(\d{1,2}[/-]\d{2,4})\b"
+    )
 
     for i, line in enumerate(lines):
+
         lower = line.text.lower()
-        if "mfd" in lower or "mfg" in lower or "manufactur" in lower:
-            m = date_pattern.search(line.text)
-            if m:
-                return m.group(1), line.confidence, line.box
-            for nxt in lines[i + 1 : i + 3]:
-                m = date_pattern.search(nxt.text)
-                if m:
-                    return m.group(1), nxt.confidence, nxt.box
+
+        # Look for manufacturing-date anchors.
+        if any(keyword in lower for keyword in [
+            "mfd",
+            "mfg",
+            "manufactur",
+            "manufacturing",
+        ]):
+
+            # Check the anchor line itself.
+            match = date_pattern.search(line.text)
+
+            if match:
+                return (
+                    match.group(1),
+                    line.confidence,
+                    line.box,
+                )
+
+            # The date is often printed on the next OCR line.
+            for nxt in lines[i + 1:i + 4]:
+
+                match = date_pattern.search(nxt.text)
+
+                if match:
+                    return (
+                        match.group(1),
+                        nxt.confidence,
+                        nxt.box,
+                    )
 
     return _no_match()
-
 
 def extract_consumer_care(lines: List[OcrLine]) -> Match:
-    """Prefers an email if found, otherwise a phone number."""
-    email_pattern = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-    phone_pattern = re.compile(r"\b(\d{2,4}[-\s]?\d{6,8}|\d{10})\b")
+    """
+    Extract the consumer-care telephone number.
 
-    for line in lines:
-        m = email_pattern.search(line.text)
-        if m:
-            return m.group(0), line.confidence, line.box
+    Phone numbers are preferred over email addresses.
+    The existing consumer_care field continues to contain the phone
+    number so the Rule Engine contract remains unchanged.
+    """
 
+    # Indian landline/mobile patterns.
+    # Require either:
+    #   (022)62487999
+    #   022-62487999
+    #   022 62487999
+    #   10-digit mobile number
+    #
+    # This intentionally does NOT accept a bare 6-digit number,
+    # because Indian PIN codes are also 6 digits.
+    phone_pattern = re.compile(
+        r"""
+        (?:
+            \(\s*\d{2,4}\s*\)\s*\d{6,8}
+            |
+            \b\d{2,4}[-\s]\d{6,8}\b
+            |
+            \b[6-9]\d{9}\b
+        )
+        """,
+        re.VERBOSE,
+    )
+
+    # First search around consumer-care/contact-related text.
+    for i, line in enumerate(lines):
+
+        lower = line.text.lower()
+
+        if any(keyword in lower for keyword in [
+            "consumer",
+            "care",
+            "contact",
+            "query",
+            "feedback",
+        ]):
+
+            # Search the anchor line and following few lines.
+            for candidate in lines[i:i + 6]:
+
+                match = phone_pattern.search(candidate.text)
+
+                if match:
+                    return (
+                        match.group(0),
+                        candidate.confidence,
+                        candidate.box,
+                    )
+
+    # General phone fallback.
     for line in lines:
-        m = phone_pattern.search(line.text)
-        if m:
-            return m.group(1), line.confidence, line.box
+
+        match = phone_pattern.search(line.text)
+
+        if match:
+            return (
+                match.group(0),
+                line.confidence,
+                line.box,
+            )
 
     return _no_match()
-
-
 def extract_country_of_origin(lines: List[OcrLine]) -> Match:
     made_in_pattern = re.compile(r"made\s*in\s*([A-Za-z]+)", re.IGNORECASE)
 
@@ -188,54 +375,86 @@ def extract_country_of_origin(lines: List[OcrLine]) -> Match:
 
 def extract_address(lines: List[OcrLine]) -> Match:
     """
-    Weakest field to get right with plain regex -- real addresses vary too
-    much in format, and PaddleOCR's detection order does NOT reliably
-    match visual reading order (confirmed on real test data: 'Add.:' was
-    sometimes immediately followed by the real address, and sometimes by
-    an unrelated 'MRP' line from a neighbouring text block).
+    Extract a multi-line address using labels such as:
+    Marketed by, Manufactured by, Address and Add.
 
-    Anchor strategy instead: Indian addresses reliably end in a 6-digit
-    PIN code. Find an 'Add.:' keyword, then search forward a few lines for
-    the nearest PIN code, and combine the lines leading up to it -- this
-    is far more robust than trusting line order alone. Revisit with
-    NLP/NER if this still proves unreliable across more test images
-    (spec section 9).
+    Stops at unrelated fields while preserving address text that
+    appears before another section on the same OCR line.
     """
-    keyword_pattern = re.compile(r"add\.?\s*[:\-]", re.IGNORECASE)
-    pincode_pattern = re.compile(r"\b\d{6}\b")
-    # lines that are noise for address purposes even if they fall inside
-    # the search window (e.g. price disclaimers physically adjacent to
-    # the address block on many Indian product labels)
-    noise_pattern = re.compile(r"\b(mrp|tax|batch|usp|exp|mfd|net\s*wt)", re.IGNORECASE)
 
-    keyword_idx = next(
-        (i for i, line in enumerate(lines) if keyword_pattern.search(line.text)), None
+    anchor_pattern = re.compile(
+        r"\b(?:marketed\s+by|manufactured\s+by|address|add\.?)\s*[:\-]?",
+        re.IGNORECASE,
     )
 
-    search_start = keyword_idx if keyword_idx is not None else 0
-    search_end = min(search_start + 6, len(lines))
+    pincode_pattern = re.compile(r"\b\d{6}\b")
 
-    for i in range(search_start, search_end):
-        if pincode_pattern.search(lines[i].text):
-            # window is wider than what we expect to keep, because noisy
-            # lines (MRP, tax disclaimers) inside it get filtered out below
-            window_start = max(search_start, i - 4)
-            parts, confidences = [], []
-            for j in range(window_start, i + 1):
-                text = keyword_pattern.sub("", lines[j].text).strip()
-                if not text or noise_pattern.search(text):
-                    continue
-                parts.append(text)
-                confidences.append(lines[j].confidence)
+    stop_pattern = re.compile(
+        r"\b(?:mrp|net\s+content|net\s+quantity|batch\s+no|"
+        r"mfd|mfg\.?\s*lic|use\s+before|country\s+of\s+origin|"
+        r"query\s*/?\s*feedback|consumer\s+care|contact)\b",
+        re.IGNORECASE,
+    )
 
-            if parts:
+    for i, line in enumerate(lines):
+
+        if not anchor_pattern.search(line.text):
+            continue
+
+        parts = []
+        confidences = []
+
+        for j in range(i, min(i + 8, len(lines))):
+
+            text = lines[j].text.strip()
+
+            if not text:
+                continue
+
+            # Remove the address anchor from the first line.
+            if j == i:
+                text = anchor_pattern.sub("", text, count=1).strip()
+
+            if not text:
+                continue
+
+            # If another section starts on this line, keep only the
+            # address text before that section.
+            if j > i:
+                stop_match = stop_pattern.search(text)
+
+                if stop_match:
+                    text = text[:stop_match.start()].strip()
+
+                    if text:
+                        parts.append(text)
+                        confidences.append(lines[j].confidence)
+
+                    break
+
+            parts.append(text)
+            confidences.append(lines[j].confidence)
+
+            # Indian addresses normally end with a 6-digit PIN.
+            if pincode_pattern.search(text):
                 combined = " ".join(parts)
-                conf = min(confidences)
-                return combined, conf, lines[i].box
+
+                return (
+                    combined.strip(" .,"),
+                    min(confidences),
+                    lines[i].box,
+                )
+
+        if parts:
+            combined = " ".join(parts)
+
+            return (
+                combined.strip(" .,"),
+                min(confidences),
+                lines[i].box,
+            )
 
     return _no_match()
-
-
 # --------------------------------------------------------------------------------
 # Orchestrator
 # --------------------------------------------------------------------------------

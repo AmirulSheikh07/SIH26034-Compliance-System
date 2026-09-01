@@ -30,8 +30,8 @@ def validate_date(date):
 
     date = date.strip()
 
-    pattern = r"^(0[1-9]|1[0-2])/\d{4}$"
-
+    pattern = r"^(0[1-9]|1[0-2])/\d{2,4}$"
+	
     return bool(re.fullmatch(pattern, date))
 
 def validate_consumer_care(contact):
