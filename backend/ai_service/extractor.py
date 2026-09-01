@@ -483,91 +483,48 @@ def extract_consumer_care(lines: List[OcrLine]) -> Match:
 
 def extract_country_of_origin(lines: List[OcrLine]) -> Match:
     """
-    IMPORTANT:
+    Detect India as country of origin.
 
-    Only accept an explicit country-of-origin declaration.
-
-    Valid examples:
-
+    Accepts India in any capitalization/format, including:
+        India
+        INDIA
+        india
         Made in India
-        MADE IN INDIA
-        Made in: India
+        Manufactured in India
         Country of Origin: India
-        Country of Origin India
 
-    DO NOT infer country from:
-
-        HAMDARD LABORATORIES (INDIA)
-
-    because "India" in a manufacturer/company name is not necessarily
-    a country-of-origin declaration.
+    If OCR detects the standalone word 'India' anywhere in the label,
+    return 'India' as the country of origin.
     """
 
-    made_in_pattern = re.compile(
-        r"\bmade\s+in\s*:?\s*([A-Za-z][A-Za-z .'-]*)",
-        re.IGNORECASE,
-    )
-
-    country_pattern = re.compile(
-        r"\bcountry\s+of\s+origin\s*:?\s*"
-        r"([A-Za-z][A-Za-z .'-]*)",
+    # --------------------------------------------------
+    # 1. Strong explicit country-of-origin declarations
+    # --------------------------------------------------
+    explicit_pattern = re.compile(
+        r"(?:"
+        r"made\s+in"
+        r"|manufactured\s+in"
+        r"|country\s+of\s+origin"
+        r"|country\s+of\s+manufacture"
+        r")"
+        r"\s*:?\s*india\b",
         re.IGNORECASE,
     )
 
     for line in lines:
+        if explicit_pattern.search(line.text):
+            return "India", line.confidence, line.box
 
-        # --------------------------------------------------
-        # Made in India
-        # --------------------------------------------------
+    # --------------------------------------------------
+    # 2. Any standalone 'India' mention
+    # --------------------------------------------------
+    india_pattern = re.compile(r"\bindia\b", re.IGNORECASE)
 
-        match = made_in_pattern.search(line.text)
-
-        if match:
-
-            country = match.group(1).strip(" .,:;-")
-
-            # Remove trailing declaration-like text
-            country = re.split(
-                r"\b(?:batch|mrp|mfg|mfd|date|expiry)\b",
-                country,
-                maxsplit=1,
-                flags=re.IGNORECASE,
-            )[0].strip(" .,:;-")
-
-            if country:
-                return (
-                    country,
-                    line.confidence,
-                    line.box,
-                )
-
-        # --------------------------------------------------
-        # Country of Origin: India
-        # --------------------------------------------------
-
-        match = country_pattern.search(line.text)
-
-        if match:
-
-            country = match.group(1).strip(" .,:;-")
-
-            if country:
-                return (
-                    country,
-                    line.confidence,
-                    line.box,
-                )
-
-    # NO generic "India" fallback here.
-    #
-    # Example:
-    # HAMDARD LABORATORIES (INDIA)
-    #
-    # should NOT automatically mean:
-    # country_of_origin = India
+    for line in lines:
+        if india_pattern.search(line.text):
+            return "India", line.confidence, line.box
 
     return _no_match()
-
 
 # ---------------------------------------------------------------------------
 # ADDRESS
